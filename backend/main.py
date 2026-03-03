@@ -1,30 +1,51 @@
-import os
-import json
+import math
+import re
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Tuple
 
-import httpx
 import feedparser
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/auto")
-
+# ===== Data Sources (multi-source, global + SEA/TH relevance) =====
 RSS_SOURCES = [
     "https://www.reuters.com/world/rss",
+    "https://feeds.bbci.co.uk/news/world/rss.xml",
     "https://feeds.bbci.co.uk/news/world/asia/rss.xml",
     "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://apnews.com/hub/apf-topnews?output=amp",
     "https://www.usgs.gov/feeds/news",
 ]
 
+# Source reliability baseline (simple prior)
+SOURCE_WEIGHT_HINTS = {
+    "reuters": 0.92,
+    "bbc": 0.90,
+    "associated press": 0.90,
+    "ap": 0.88,
+    "al jazeera": 0.82,
+    "usgs": 0.95,
+}
+
 TH_KEYWORDS = [
     "thailand", "thai", "bangkok", "myanmar", "cambodia", "laos", "malaysia",
-    "south china sea", "flood", "storm", "earthquake", "wildfire", "pm2.5"
+    "south china sea", "andaman", "mekong", "gulf of thailand"
 ]
 
-app = FastAPI(title="GeoRisk Thailand API", version="0.2.0")
+CATEGORY_KEYWORDS = {
+    "conflict": ["conflict", "clash", "strike", "missile", "military", "troops", "protest", "riot"],
+    "sanctions": ["sanction", "embargo", "restriction", "tariff", "export control"],
+    "shipping_disruption": ["shipping", "port", "strait", "freight", "container", "route", "blockade"],
+    "cyber_incidents": ["cyber", "ransomware", "breach", "ddos", "malware", "hack"],
+    "commodity_shock": ["oil", "gas", "lng", "commodity", "food price", "wheat", "rice", "inflation"],
+    "flood_storm": ["flood", "storm", "typhoon", "cyclone", "heavy rain", "landslide"],
+    "earthquake_geology": ["earthquake", "quake", "tsunami", "volcano"],
+    "air_quality_wildfire": ["pm2.5", "haze", "wildfire", "air quality", "smoke"],
+    "public_health": ["outbreak", "epidemic", "pandemic", "disease", "hospital surge"],
+}
+
+app = FastAPI(title="GeoRisk Thailand API", version="0.3.0")
 FRONTEND_DIR = "/app/frontend"
 app.add_middleware(
     CORSMiddleware,
@@ -39,36 +60,112 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def clamp(v: int, lo=0, hi=100) -> int:
-    return max(lo, min(hi, int(v)))
+def clamp(v: float, lo=0, hi=100) -> int:
+    return max(lo, min(hi, int(round(v))))
 
 
-def collect_news(limit: int = 80) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
+def norm_text(s: str) -> str:
+    s = (s or "").lower().strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+
+def source_weight(source_name: str) -> float:
+    n = norm_text(source_name)
+    for k, w in SOURCE_WEIGHT_HINTS.items():
+        if k in n:
+            return w
+    return 0.75
+
+
+def classify_categories(text: str) -> Dict[str, int]:
+    t = norm_text(text)
+    out = {k: 0 for k in CATEGORY_KEYWORDS.keys()}
+    for cat, kws in CATEGORY_KEYWORDS.items():
+        for kw in kws:
+            if kw in t:
+                out[cat] += 1
+    return out
+
+
+def thailand_relevance(text: str) -> float:
+    t = norm_text(text)
+    hits = sum(1 for k in TH_KEYWORDS if k in t)
+    return min(1.0, hits / 3)
+
+
+def collect_news(limit: int = 120) -> List[Dict[str, Any]]:
+    raw: List[Dict[str, Any]] = []
     for url in RSS_SOURCES:
-        feed = feedparser.parse(url)
-        for e in feed.entries[:60]:
-            title = e.get("title", "")
-            summary = e.get("summary", "")
-            blob = f"{title} {summary}".lower()
-            if any(k in blob for k in TH_KEYWORDS):
-                items.append({
+        try:
+            feed = feedparser.parse(url)
+            feed_title = feed.feed.get("title", url)
+            for e in feed.entries[:60]:
+                title = e.get("title", "")
+                summary = e.get("summary", "")
+                if not title:
+                    continue
+                text = f"{title} {summary}"
+                raw.append({
                     "title": title,
                     "summary": summary,
                     "link": e.get("link", ""),
                     "published": e.get("published", ""),
-                    "source": feed.feed.get("title", url),
+                    "source": feed_title,
+                    "source_weight": source_weight(feed_title),
+                    "categories": classify_categories(text),
+                    "thailand_relevance": thailand_relevance(text),
                 })
-
-    seen = set()
-    dedup = []
-    for it in items:
-        key = (it["title"][:150]).strip().lower()
-        if key in seen:
+        except Exception:
             continue
-        seen.add(key)
-        dedup.append(it)
-    return dedup[:limit]
+
+    # Dedupe + fuse by normalized title key
+    fused: Dict[str, Dict[str, Any]] = {}
+    for it in raw:
+        key = norm_text(it["title"])[:180]
+        if key not in fused:
+            fused[key] = {
+                "title": it["title"],
+                "summary": it["summary"],
+                "link": it["link"],
+                "published": it["published"],
+                "sources": [it["source"]],
+                "source_weights": [it["source_weight"]],
+                "categories": it["categories"].copy(),
+                "thailand_relevance": it["thailand_relevance"],
+            }
+        else:
+            f = fused[key]
+            if it["source"] not in f["sources"]:
+                f["sources"].append(it["source"])
+                f["source_weights"].append(it["source_weight"])
+            for c, v in it["categories"].items():
+                f["categories"][c] += v
+            f["thailand_relevance"] = max(f["thailand_relevance"], it["thailand_relevance"])
+
+    events = list(fused.values())
+    for ev in events:
+        src_count = len(ev["sources"])
+        avg_w = sum(ev["source_weights"]) / max(1, len(ev["source_weights"]))
+        ev["confidence"] = round(min(1.0, avg_w * (1 + math.log1p(src_count) / 2)), 3)
+
+    # prioritize TH relevance + confidence
+    events.sort(key=lambda x: (x["thailand_relevance"], x["confidence"], len(x["sources"])), reverse=True)
+    return events[:limit]
+
+
+def scores_from_events(events: List[Dict[str, Any]]) -> Dict[str, int]:
+    cats = {k: 0.0 for k in CATEGORY_KEYWORDS.keys()}
+    for ev in events:
+        w = ev["confidence"] * (0.5 + ev["thailand_relevance"])
+        for c, v in ev["categories"].items():
+            cats[c] += w * v
+
+    # normalize to 0..100 with soft cap
+    mx = max(cats.values()) if cats else 1.0
+    if mx <= 0:
+        return {k: 10 for k in cats.keys()}
+    return {k: clamp((v / mx) * 70 + 15) for k, v in cats.items()}
 
 
 def normalize_three(best: int, base: int, worst: int) -> Tuple[int, int, int]:
@@ -79,109 +176,138 @@ def normalize_three(best: int, base: int, worst: int) -> Tuple[int, int, int]:
     return b, c, w
 
 
-def fallback_analysis(news_count: int) -> Dict[str, Any]:
-    intensity = min(20, news_count // 4)
-    scores = {
-        "conflict": clamp(38 + intensity),
-        "sanctions": clamp(16 + intensity // 2),
-        "shipping_disruption": clamp(34 + intensity),
-        "cyber_incidents": clamp(45 + intensity),
-        "commodity_shock": clamp(40 + intensity),
-        "flood_storm": clamp(36 + intensity // 2),
-        "earthquake_geology": clamp(22 + intensity // 3),
-        "air_quality_wildfire": clamp(30 + intensity // 2),
-        "public_health": clamp(20 + intensity // 3),
-    }
-
-    best, base, worst = normalize_three(20, 55, 25)
+def scenario_from_scores(scores: Dict[str, int]) -> Dict[str, Any]:
+    core = (scores["conflict"] + scores["shipping_disruption"] + scores["cyber_incidents"] + scores["commodity_shock"]) / 4
+    worst = clamp(10 + core * 0.35, 10, 55)
+    best = clamp(25 - core * 0.10, 8, 30)
+    base = max(100 - best - worst, 20)
+    best, base, worst = normalize_three(best, base, worst)
 
     return {
-        "scores": scores,
-        "future_scenarios": {
-            "best": {
-                "probability": best,
-                "what_could_happen": [
-                    "แรงกดดันภูมิรัฐศาสตร์ชะลอลง",
-                    "เส้นทางขนส่งกลับสู่ภาวะปกติ",
-                    "ราคาพลังงานแกว่งตัวแคบ"
-                ],
-                "impact_thailand": "บวกเล็กน้อย"
-            },
-            "base": {
-                "probability": base,
-                "what_could_happen": [
-                    "เหตุเสี่ยงเกิดเป็นช่วง ๆ",
-                    "โลจิสติกส์ติดขัดบางช่วงเวลา",
-                    "ต้นทุนพลังงาน/สินค้าโภคภัณฑ์ผันผวนปานกลาง"
-                ],
-                "impact_thailand": "กลาง"
-            },
-            "worst": {
-                "probability": worst,
-                "what_could_happen": [
-                    "ความขัดแย้งขยายวงในภูมิภาค",
-                    "เกิด disruption กับขนส่ง/พลังงาน",
-                    "เหตุไซเบอร์กระทบภาคธุรกิจสำคัญ"
-                ],
-                "impact_thailand": "ลบสูง"
-            }
+        "best": {
+            "probability": best,
+            "what_could_happen": [
+                "แรงกดดันภูมิรัฐศาสตร์ชะลอลง",
+                "เส้นทางขนส่งหลักคงเสถียร",
+                "ราคาพลังงานผันผวนต่ำ"
+            ],
+            "impact_thailand": "บวกเล็กน้อย"
         },
-        "impact_to_thailand": {
-            "economy": clamp(55 + intensity // 2),
-            "logistics": clamp(52 + intensity // 2),
-            "security": clamp(46 + intensity // 2),
-            "energy_commodity": clamp(60 + intensity // 2),
-            "tourism_investment": clamp(44 + intensity // 2),
+        "base": {
+            "probability": base,
+            "what_could_happen": [
+                "เหตุเสี่ยงเกิดเป็นช่วง ๆ",
+                "ดีเลย์โลจิสติกส์บางเส้นทาง",
+                "ต้นทุนวัตถุดิบแกว่งตัวระดับกลาง"
+            ],
+            "impact_thailand": "กลาง"
         },
-        "action_plan_percent": {
-            "high_risk_50": {
-                "personal": [
-                    {"step": "ติดตามสัญญาณเสี่ยงวันละ 2 รอบ", "percent": 20},
-                    {"step": "เตรียมน้ำ-อาหารฉุกเฉินและเอกสาร", "percent": 15},
-                    {"step": "หลีกเลี่ยงโซนเสี่ยงตามแผนที่", "percent": 15}
-                ],
-                "business": [
-                    {"step": "กระจาย supplier และเส้นทางขนส่ง", "percent": 20},
-                    {"step": "เพิ่ม cyber hardening + SOC watch", "percent": 15},
-                    {"step": "ทำ hedge ต้นทุนพลังงาน/วัตถุดิบ", "percent": 15}
-                ]
-            },
-            "low_risk_10": {
-                "personal": [
-                    {"step": "ตรวจข่าวเชิงความเสี่ยงรายวัน", "percent": 4},
-                    {"step": "ทบทวนแผนฉุกเฉินรายเดือน", "percent": 3},
-                    {"step": "สำรองยา/เวชภัณฑ์พื้นฐาน", "percent": 3}
-                ],
-                "business": [
-                    {"step": "monitor KPI ความเสี่ยงหลัก", "percent": 4},
-                    {"step": "ทดสอบ BCP/DR ตามรอบ", "percent": 3},
-                    {"step": "อัปเดต vendor risk score", "percent": 3}
-                ]
-            }
-        },
-        "preparedness_quantities": {
-            "household_4_people": {
-                "water_liters_per_day": 12,
-                "water_liters_7d": 84,
-                "water_liters_14d": 168,
-                "rice_kg_14d": "14-18",
-                "canned_protein_units_14d": "56-84",
-                "medicine_days": 30
-            },
-            "business_mid_size": {
-                "safety_stock_days_base": 14,
-                "safety_stock_days_stress": 21,
-                "backup_suppliers_per_critical_item": 2,
-                "incident_response_sla_hours": 4
-            }
-        },
-        "summary": "Thailand multi-risk level: medium with elevated energy/commodity + cyber + logistics coupling"
+        "worst": {
+            "probability": worst,
+            "what_could_happen": [
+                "ความขัดแย้งขยายวงและกระทบซัพพลายเชน",
+                "ราคาพลังงานพุ่งแรง",
+                "เหตุไซเบอร์กระทบภาคธุรกิจสำคัญ"
+            ],
+            "impact_thailand": "ลบสูง"
+        }
     }
 
 
-async def llm_risk_scenario(news: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # keep deterministic baseline for stability; can switch to live LLM later
-    return fallback_analysis(len(news))
+def impact_from_scores(scores: Dict[str, int]) -> Dict[str, int]:
+    return {
+        "economy": clamp((scores["commodity_shock"] * 0.5 + scores["sanctions"] * 0.3 + scores["public_health"] * 0.2)),
+        "logistics": clamp((scores["shipping_disruption"] * 0.6 + scores["flood_storm"] * 0.4)),
+        "security": clamp((scores["conflict"] * 0.6 + scores["cyber_incidents"] * 0.4)),
+        "energy_commodity": clamp((scores["commodity_shock"] * 0.7 + scores["shipping_disruption"] * 0.3)),
+        "tourism_investment": clamp((scores["conflict"] * 0.35 + scores["air_quality_wildfire"] * 0.25 + scores["public_health"] * 0.4)),
+    }
+
+
+def action_plan_percent() -> Dict[str, Any]:
+    return {
+        "high_risk_50": {
+            "personal": [
+                {"step": "ติดตามสัญญาณเสี่ยงวันละ 2 รอบ", "percent": 20},
+                {"step": "เตรียมน้ำ-อาหารฉุกเฉินและเอกสาร", "percent": 15},
+                {"step": "หลีกเลี่ยงโซนเสี่ยงตามแผนที่", "percent": 15},
+            ],
+            "business": [
+                {"step": "กระจาย supplier และเส้นทางขนส่ง", "percent": 20},
+                {"step": "เพิ่ม cyber hardening + SOC watch", "percent": 15},
+                {"step": "ทำ hedge ต้นทุนพลังงาน/วัตถุดิบ", "percent": 15},
+            ],
+        },
+        "low_risk_10": {
+            "personal": [
+                {"step": "ตรวจข่าวเชิงความเสี่ยงรายวัน", "percent": 4},
+                {"step": "ทบทวนแผนฉุกเฉินรายเดือน", "percent": 3},
+                {"step": "สำรองยา/เวชภัณฑ์พื้นฐาน", "percent": 3},
+            ],
+            "business": [
+                {"step": "monitor KPI ความเสี่ยงหลัก", "percent": 4},
+                {"step": "ทดสอบ BCP/DR ตามรอบ", "percent": 3},
+                {"step": "อัปเดต vendor risk score", "percent": 3},
+            ],
+        },
+    }
+
+
+def preparedness_quantities() -> Dict[str, Any]:
+    return {
+        "household_4_people": {
+            "water_liters_per_day": 12,
+            "water_liters_7d": 84,
+            "water_liters_14d": 168,
+            "water_liters_30d": 360,
+            "rice_kg_14d": "14-18",
+            "canned_protein_units_14d": "56-84",
+            "medicine_days": 30,
+            "power_banks_min": 2
+        },
+        "business_mid_size": {
+            "safety_stock_days_base": 14,
+            "safety_stock_days_stress": 21,
+            "backup_suppliers_per_critical_item": 2,
+            "incident_response_sla_hours": 4,
+            "backup_connectivity_links": 2
+        }
+    }
+
+
+def quality_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    source_counter: Dict[str, int] = {}
+    for e in events:
+        for s in e.get("sources", []):
+            source_counter[s] = source_counter.get(s, 0) + 1
+    total_mentions = max(1, sum(source_counter.values()))
+    top_share = max(source_counter.values()) / total_mentions if source_counter else 1.0
+    warnings = []
+    if top_share > 0.5:
+        warnings.append("source_concentration_high")
+    if len(source_counter) < 3:
+        warnings.append("low_source_diversity")
+    return {
+        "sources_used": len(source_counter),
+        "source_distribution": source_counter,
+        "top_source_share": round(top_share, 3),
+        "warnings": warnings,
+    }
+
+
+def build_analysis(events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    scores = scores_from_events(events)
+    scenarios = scenario_from_scores(scores)
+    impact = impact_from_scores(scores)
+    return {
+        "scores": scores,
+        "future_scenarios": scenarios,
+        "impact_to_thailand": impact,
+        "action_plan_percent": action_plan_percent(),
+        "preparedness_quantities": preparedness_quantities(),
+        "data_quality": quality_metrics(events),
+        "summary": "Thailand multi-risk: weighted fusion from multi-source global + regional feeds (defensive posture).",
+    }
 
 
 def parse_map_link(url: str) -> Dict[str, Any]:
@@ -209,28 +335,35 @@ def root_ui():
 
 
 @app.get("/api/news")
-def api_news(limit: int = Query(40, ge=10, le=200)):
-    news = collect_news(limit)
-    return {"ts": now_iso(), "count": len(news), "items": news}
+def api_news(limit: int = Query(60, ge=10, le=300)):
+    events = collect_news(limit)
+    return {"ts": now_iso(), "count": len(events), "items": events}
 
 
 @app.get("/api/risk")
-async def api_risk():
-    news = collect_news(80)
-    analysis = await llm_risk_scenario(news)
-    return {"ts": now_iso(), "focus": "Thailand", "news_count": len(news), "analysis": analysis}
+def api_risk():
+    events = collect_news(120)
+    analysis = build_analysis(events)
+    return {
+        "ts": now_iso(),
+        "focus": "Thailand",
+        "event_count": len(events),
+        "analysis": analysis,
+    }
 
 
 @app.get("/api/geo-assess")
-async def api_geo_assess(map_url: str = Query(...), radius_km: float = Query(2.0, ge=0.5, le=20)):
+def api_geo_assess(map_url: str = Query(...), radius_km: float = Query(2.0, ge=0.5, le=20)):
     coords = parse_map_link(map_url)
-    news = collect_news(60)
-    base = fallback_analysis(len(news))
+    events = collect_news(80)
+    analysis = build_analysis(events)
+    sec = analysis["impact_to_thailand"]["security"]
+    conf = analysis["scores"]["conflict"]
     hotspot = {
-        "area_risk_percent": clamp((base["impact_to_thailand"]["security"] + base["scores"]["conflict"]) // 2),
+        "area_risk_percent": clamp((sec + conf) / 2),
         "window": "24-72h",
         "recommendation": [
-            f"หลีกเลี่ยงรัศมี {radius_km} กม. รอบจุดเสี่ยงช่วงเวลาชุมนุม",
+            f"หลีกเลี่ยงรัศมี {radius_km} กม. รอบพื้นที่ที่มีสัญญาณความเสี่ยงสูง",
             "ติดตามแจ้งเตือนทุก 2 ชั่วโมง",
             "เตรียมเส้นทางสำรองอย่างน้อย 2 เส้นทาง"
         ]
@@ -239,5 +372,6 @@ async def api_geo_assess(map_url: str = Query(...), radius_km: float = Query(2.0
         "ts": now_iso(),
         "input": {"map_url": map_url, "radius_km": radius_km, **coords},
         "hotspot_assessment": hotspot,
-        "analysis_hint": "defensive early-warning only"
+        "analysis_hint": "defensive early-warning only",
+        "evidence_count": len(events)
     }
