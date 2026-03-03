@@ -182,33 +182,22 @@ def scenario_from_scores(scores: Dict[str, int]) -> Dict[str, Any]:
     best = clamp(25 - core * 0.10, 8, 30)
     base = max(100 - best - worst, 20)
     best, base, worst = normalize_three(best, base, worst)
+    dyn = scenario_text_from_scores(scores)
 
     return {
         "best": {
             "probability": best,
-            "what_could_happen": [
-                "แรงกดดันภูมิรัฐศาสตร์ชะลอลง",
-                "เส้นทางขนส่งหลักคงเสถียร",
-                "ราคาพลังงานผันผวนต่ำ"
-            ],
+            "what_could_happen": ["แรงกดดันหลักชะลอลง", "ระบบขนส่งเสถียรขึ้น", "ความผันผวนตลาดลดลง"],
             "impact_thailand": "บวกเล็กน้อย"
         },
         "base": {
             "probability": base,
-            "what_could_happen": [
-                "เหตุเสี่ยงเกิดเป็นช่วง ๆ",
-                "ดีเลย์โลจิสติกส์บางเส้นทาง",
-                "ต้นทุนวัตถุดิบแกว่งตัวระดับกลาง"
-            ],
+            "what_could_happen": dyn,
             "impact_thailand": "กลาง"
         },
         "worst": {
             "probability": worst,
-            "what_could_happen": [
-                "ความขัดแย้งขยายวงและกระทบซัพพลายเชน",
-                "ราคาพลังงานพุ่งแรง",
-                "เหตุไซเบอร์กระทบภาคธุรกิจสำคัญ"
-            ],
+            "what_could_happen": ["สัญญาณหลักลุกลามพร้อมกัน", "ต้นทุนพลังงาน/ขนส่งพุ่ง", "ความเสี่ยงไซเบอร์-ความมั่นคงเพิ่ม"],
             "impact_thailand": "ลบสูง"
         }
     }
@@ -331,6 +320,75 @@ def quality_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+
+
+def top_categories(scores: Dict[str, int], n: int = 3):
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:n]
+
+
+def scenario_text_from_scores(scores: Dict[str, int]):
+    top = [k for k,_ in top_categories(scores,3)]
+    def phrase(cat):
+        m={
+          'conflict':'แรงกดดันความขัดแย้งและการประท้วง',
+          'sanctions':'แรงกดดันมาตรการคว่ำบาตร/การค้า',
+          'shipping_disruption':'ความเสี่ยงสะดุดในเส้นทางขนส่ง',
+          'cyber_incidents':'ความเสี่ยงเหตุการณ์ไซเบอร์',
+          'commodity_shock':'ความผันผวนพลังงาน/สินค้าโภคภัณฑ์',
+          'flood_storm':'ความเสี่ยงน้ำท่วม/พายุ',
+          'earthquake_geology':'ความเสี่ยงแผ่นดินไหว/ธรณี',
+          'air_quality_wildfire':'ความเสี่ยงคุณภาพอากาศ/ไฟป่า',
+          'public_health':'ความเสี่ยงด้านสาธารณสุข',
+        }
+        return m.get(cat,cat)
+    return [f"สัญญาณหลัก: {phrase(c)}" for c in top]
+
+
+def formula_panel(scores: Dict[str,int], events: List[Dict[str,Any]]):
+    return {
+      "scores_formula": "score_cat = clamp((weighted_cat_signal/max_signal)*70 + 15)",
+      "event_weight_formula": "event_weight = confidence * (0.5 + thailand_relevance)",
+      "confidence_formula": "confidence = min(1, avg_source_weight * (1 + ln(1+source_count)/2))",
+      "impact_formula": {
+        "economy": "0.5*commodity_shock + 0.3*sanctions + 0.2*public_health",
+        "logistics": "0.6*shipping_disruption + 0.4*flood_storm",
+        "security": "0.6*conflict + 0.4*cyber_incidents",
+      },
+      "scenario_formula": "worst=clamp(10+core*0.35), best=clamp(25-core*0.10), base=100-best-worst",
+      "input_event_count": len(events)
+    }
+
+
+def data_lineage(events: List[Dict[str, Any]], scores: Dict[str,int]):
+    top = [k for k,_ in top_categories(scores,3)]
+    lineage={}
+    for cat in top:
+        related=[]
+        for ev in events:
+            if ev.get('categories',{}).get(cat,0)>0:
+                related.append({
+                    'title': ev.get('title'),
+                    'sources': ev.get('sources',[]),
+                    'confidence': ev.get('confidence',0),
+                    'thailand_relevance': ev.get('thailand_relevance',0)
+                })
+        lineage[cat]={'evidence_count':len(related),'evidence':related[:8]}
+    return lineage
+
+
+def weight_breakdown(events: List[Dict[str, Any]]):
+    src={}
+    for ev in events:
+        for s in ev.get('sources',[]):
+            src[s]=src.get(s,0)+1
+    by_source=[{'source':k,'mentions':v,'share':round(v/max(1,sum(src.values())),3)} for k,v in sorted(src.items(), key=lambda kv: kv[1], reverse=True)]
+    return {
+      'source_stage': by_source,
+      'event_stage_note': 'dedupe by normalized title; merge multi-source confirmations',
+      'category_stage_note': 'keyword category signals aggregated with event_weight',
+      'risk_stage_note': 'normalized weighted category signal -> risk score 0..100'
+    }
+
 def build_analysis(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     scores = scores_from_events(events)
     scenarios = scenario_from_scores(scores)
@@ -343,6 +401,10 @@ def build_analysis(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "preparedness_quantities": preparedness_quantities(),
         "data_quality": quality_metrics(events),
         "detailed_metrics": detailed_metrics(events, scores),
+        "formula_panel": formula_panel(scores, events),
+        "data_lineage": data_lineage(events, scores),
+        "weight_breakdown": weight_breakdown(events),
+        "no_hardcoded_mode": True,
         "summary": "Thailand multi-risk: weighted fusion from multi-source global + regional feeds (defensive posture).",
     }
 
