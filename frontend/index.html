@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>GeoRisk Thailand</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body{font-family:system-ui;background:#0b1020;color:#e8ecff;margin:0;padding:20px}
+    .wrap{max-width:1200px;margin:auto}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+    .card{background:#141b33;border:1px solid #263156;border-radius:12px;padding:14px}
+    .kpi{display:grid;grid-template-columns:repeat(5,1fr);gap:10px}
+    .pill{background:#1d2748;border-radius:10px;padding:10px;text-align:center}
+    h1{margin:0 0 12px}
+    a{color:#9ec1ff}
+    pre{white-space:pre-wrap}
+    ul{margin:6px 0 6px 18px}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>GeoRisk Thailand (near real-time)</h1>
+  <div id="ts"></div>
+
+  <div class="card" style="margin:12px 0">
+    <button onclick="loadAll()">Refresh</button>
+    <span id="status"></span>
+  </div>
+
+  <div class="card">
+    <div class="kpi" id="kpi"></div>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <div class="card">
+      <h3>Risk Radar</h3>
+      <canvas id="riskChart"></canvas>
+    </div>
+    <div class="card">
+      <h3>Forecast Scenarios (%)</h3>
+      <div id="scenarios"></div>
+      <hr style="border-color:#263156;margin:10px 0">
+      <h4>Impact to Thailand (%)</h4>
+      <div id="impact"></div>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:12px">
+    <div class="card"><h3>Action Plan 50% (High Risk)</h3><div id="ap50"></div></div>
+    <div class="card"><h3>Action Plan 10% (Low Risk)</h3><div id="ap10"></div></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>Preparedness Quantities</h3>
+    <pre id="prep"></pre>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>Summary</h3>
+    <pre id="summary"></pre>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h3>Thailand-related News Feed</h3>
+    <div id="news"></div>
+  </div>
+</div>
+
+<script>
+const API = '/api';
+let chart;
+
+async function loadAll(){
+  document.getElementById('status').textContent=' loading...';
+  const [riskRes, newsRes] = await Promise.all([
+    fetch(API + '/risk').then(r=>r.json()),
+    fetch(API + '/news?limit=30').then(r=>r.json())
+  ]);
+
+  document.getElementById('ts').textContent = `Updated: ${riskRes.ts}`;
+  const a = riskRes.analysis || {};
+  const s = a.scores || {};
+
+  const keys = ['conflict','sanctions','shipping_disruption','cyber_incidents','commodity_shock'];
+  document.getElementById('kpi').innerHTML = keys.map(k=>`<div class='pill'><div>${k}</div><b>${s[k] ?? '-'}</b></div>`).join('');
+
+  const ctx = document.getElementById('riskChart');
+  if(chart) chart.destroy();
+  chart = new Chart(ctx,{type:'radar',data:{labels:keys,datasets:[{label:'Risk',data:keys.map(k=>s[k]||0)}]}});
+
+  const fs = a.future_scenarios || {};
+  const best = fs.best || {}; const base = fs.base || {}; const worst = fs.worst || {};
+  const scenarioCard = (label, obj) => `
+    <div style='margin-bottom:8px;padding:8px;background:#1b2444;border-radius:8px'>
+      <div><b>${label}</b>: ${obj.probability ?? '-'}%</div>
+      <div style='opacity:.85'>Impact TH: ${obj.impact_thailand || '-'}</div>
+      <ul>${(obj.what_could_happen||[]).map(i=>`<li>${i}</li>`).join('')}</ul>
+    </div>`;
+  document.getElementById('scenarios').innerHTML = scenarioCard('Best', best)+scenarioCard('Base', base)+scenarioCard('Worst', worst);
+
+  const imp = a.impact_to_thailand || {};
+  document.getElementById('impact').innerHTML = Object.entries(imp).map(([k,v])=>`<div>${k}: <b>${v}%</b></div>`).join('') || '-';
+
+  const app = a.action_plan_percent || {};
+  const renderPlan = (grp) => {
+    const p = grp?.personal || []; const b = grp?.business || [];
+    return `<div><b>Personal</b><ul>${p.map(x=>`<li>${x.step} — ${x.percent}%</li>`).join('')}</ul></div>
+            <div><b>Business</b><ul>${b.map(x=>`<li>${x.step} — ${x.percent}%</li>`).join('')}</ul></div>`;
+  };
+  document.getElementById('ap50').innerHTML = renderPlan(app.high_risk_50 || {});
+  document.getElementById('ap10').innerHTML = renderPlan(app.low_risk_10 || {});
+
+  document.getElementById('prep').textContent = JSON.stringify(a.preparedness_quantities || {}, null, 2);
+  document.getElementById('summary').textContent = a.summary || '-';
+
+  document.getElementById('news').innerHTML = (newsRes.items||[]).map(n=>`<div style='margin:8px 0'><a href='${n.link}' target='_blank'>${n.title}</a><div style='opacity:.7'>${n.source} | ${n.published||''}</div></div>`).join('');
+  document.getElementById('status').textContent=' done';
+}
+loadAll();
+setInterval(loadAll, 120000);
+</script>
+</body>
+</html>
