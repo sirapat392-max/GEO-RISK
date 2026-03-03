@@ -6,9 +6,10 @@ services:
     command: bash -lc "pip install -r /app/backend/requirements.txt && uvicorn backend.main:app --host 0.0.0.0 --port 8090"
     volumes:
       - /root/GEO-RISK:/app
+    env_file:
+      - ../.env
     environment:
-      - OPENROUTER_API_KEY=__REMOVED__
-      - OPENROUTER_MODEL=openrouter/auto
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openrouter/auto}
     ports:
       - "8090:8090"
     restart: unless-stopped
