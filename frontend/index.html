@@ -95,6 +95,11 @@
   </div>
 
   <div class="card" style="margin-top:14px">
+    <div class="section">Detailed Intelligence Metrics</div>
+    <pre id="metrics"></pre>
+  </div>
+
+  <div class="card" style="margin-top:14px">
     <div class="section">Summary</div>
     <pre id="summary"></pre>
   </div>
@@ -153,7 +158,7 @@ async function loadAll(){
 
   document.getElementById('prep').textContent = JSON.stringify(a.preparedness_quantities||{}, null, 2);
   document.getElementById('quality').textContent = JSON.stringify(a.data_quality||{}, null, 2);
-  document.getElementById('summary').textContent = a.summary || '-';
+  document.getElementById('summary').textContent = a.summary || '-';\n  document.getElementById('metrics').textContent = JSON.stringify(a.detailed_metrics||{}, null, 2);
 
   document.getElementById('news').innerHTML = (newsRes.items||[]).map(n=>`<div class='news-item'><a href='${n.link}' target='_blank'>${n.title}</a><div class='muted'>${(n.sources||[n.source]).join(', ')} | ${n.published||''}</div></div>`).join('');
 

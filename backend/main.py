@@ -275,6 +275,42 @@ def preparedness_quantities() -> Dict[str, Any]:
     }
 
 
+
+
+def detailed_metrics(events: List[Dict[str, Any]], scores: Dict[str, int]) -> Dict[str, Any]:
+    # event severity proxy
+    severe_words = ["attack","explosion","fatal","dead","missile","earthquake","flood","riot","sanction"]
+    severe_count = 0
+    by_cat = {k: {"event_count": 0, "avg_confidence": 0.0, "top_events": []} for k in CATEGORY_KEYWORDS.keys()}
+
+    for ev in events:
+        txt = (ev.get("title","")+" "+ev.get("summary","")).lower()
+        if any(w in txt for w in severe_words):
+            severe_count += 1
+        conf = float(ev.get("confidence", 0.0))
+        for c, v in ev.get("categories", {}).items():
+            if v > 0:
+                by_cat[c]["event_count"] += 1
+                by_cat[c]["avg_confidence"] += conf
+                if len(by_cat[c]["top_events"]) < 3:
+                    by_cat[c]["top_events"].append({
+                        "title": ev.get("title"),
+                        "confidence": conf,
+                        "sources": ev.get("sources", [])
+                    })
+
+    for c in by_cat:
+        ec = by_cat[c]["event_count"]
+        if ec > 0:
+            by_cat[c]["avg_confidence"] = round(by_cat[c]["avg_confidence"] / ec, 3)
+
+    overall = {
+        "event_volume": len(events),
+        "severe_signal_count": severe_count,
+        "thailand_relevance_avg": round(sum(e.get("thailand_relevance",0) for e in events)/max(1,len(events)),3),
+        "risk_level": "high" if max(scores.values()) >= 70 else ("medium" if max(scores.values()) >= 45 else "low")
+    }
+    return {"overall": overall, "by_category": by_cat}
 def quality_metrics(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     source_counter: Dict[str, int] = {}
     for e in events:
@@ -306,6 +342,7 @@ def build_analysis(events: List[Dict[str, Any]]) -> Dict[str, Any]:
         "action_plan_percent": action_plan_percent(),
         "preparedness_quantities": preparedness_quantities(),
         "data_quality": quality_metrics(events),
+        "detailed_metrics": detailed_metrics(events, scores),
         "summary": "Thailand multi-risk: weighted fusion from multi-source global + regional feeds (defensive posture).",
     }
 
