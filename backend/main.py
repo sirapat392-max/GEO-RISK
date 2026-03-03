@@ -47,6 +47,7 @@ CATEGORY_KEYWORDS = {
 
 app = FastAPI(title="GeoRisk Thailand API", version="0.3.0")
 FRONTEND_DIR = "/app/frontend"
+SNAPSHOT_FILE = "/app/data/snapshots.jsonl"
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -409,6 +410,38 @@ def build_analysis(events: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+
+
+def ensure_data_dir():
+    from pathlib import Path
+    Path('/app/data').mkdir(parents=True, exist_ok=True)
+
+
+def load_last_snapshot() -> Dict[str, Any] | None:
+    from pathlib import Path
+    fp = Path(SNAPSHOT_FILE)
+    if not fp.exists():
+        return None
+    try:
+        lines = fp.read_text().strip().splitlines()
+        if not lines:
+            return None
+        return json.loads(lines[-1])
+    except Exception:
+        return None
+
+
+def append_snapshot(payload: Dict[str, Any]):
+    ensure_data_dir()
+    with open(SNAPSHOT_FILE, 'a', encoding='utf-8') as f:
+        f.write(json.dumps(payload, ensure_ascii=False) + '\n')
+
+
+def delta_scores(curr: Dict[str,int], prev: Dict[str,int] | None) -> Dict[str,int]:
+    if not prev:
+        return {k: 0 for k in curr.keys()}
+    return {k: int(curr.get(k,0) - int(prev.get(k,0))) for k in curr.keys()}
+
 def parse_map_link(url: str) -> Dict[str, Any]:
     out = {"lat": None, "lng": None}
     try:
@@ -443,6 +476,26 @@ def api_news(limit: int = Query(60, ge=10, le=300)):
 def api_risk():
     events = collect_news(120)
     analysis = build_analysis(events)
+
+    prev = load_last_snapshot()
+    prev_scores = (prev or {}).get("scores") if prev else None
+    deltas = delta_scores(analysis.get("scores", {}), prev_scores)
+
+    snapshot = {
+        "ts": now_iso(),
+        "scores": analysis.get("scores", {}),
+        "event_count": len(events),
+        "top_source_share": analysis.get("data_quality", {}).get("top_source_share")
+    }
+    append_snapshot(snapshot)
+
+    analysis["delta_24h_proxy"] = deltas
+    analysis["explain_change"] = {
+        "note": "delta compared to previous snapshot",
+        "largest_up": sorted(deltas.items(), key=lambda kv: kv[1], reverse=True)[:3],
+        "largest_down": sorted(deltas.items(), key=lambda kv: kv[1])[:3]
+    }
+
     return {
         "ts": now_iso(),
         "focus": "Thailand",
@@ -474,3 +527,18 @@ def api_geo_assess(map_url: str = Query(...), radius_km: float = Query(2.0, ge=0
         "analysis_hint": "defensive early-warning only",
         "evidence_count": len(events)
     }
+
+
+@app.get("/api/trend")
+def api_trend(limit: int = Query(50, ge=1, le=500)):
+    from pathlib import Path
+    fp = Path(SNAPSHOT_FILE)
+    if not fp.exists():
+        return {"count": 0, "items": []}
+    items = []
+    for line in fp.read_text().splitlines()[-limit:]:
+        try:
+            items.append(json.loads(line))
+        except Exception:
+            pass
+    return {"count": len(items), "items": items}
