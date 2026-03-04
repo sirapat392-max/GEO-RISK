@@ -179,7 +179,9 @@ async function loadAll(){
 
   document.getElementById('prep').textContent = JSON.stringify(a.preparedness_quantities||{}, null, 2);
   document.getElementById('quality').textContent = JSON.stringify(a.data_quality||{}, null, 2);
-  document.getElementById('summary').textContent = a.summary || '-';\n  document.getElementById('delta').textContent = JSON.stringify({delta:a.delta_24h_proxy, explain:a.explain_change}, null, 2);\n  document.getElementById('metrics').textContent = JSON.stringify(a.detailed_metrics||{}, null, 2);
+  document.getElementById('summary').textContent = a.summary || '-';
+  document.getElementById('delta').textContent = JSON.stringify({delta:a.delta_24h_proxy, explain:a.explain_change}, null, 2);
+  document.getElementById('metrics').textContent = JSON.stringify(a.detailed_metrics||{}, null, 2);
   document.getElementById('formula').textContent = JSON.stringify(a.formula_panel||{}, null, 2);
   document.getElementById('weights').textContent = JSON.stringify(a.weight_breakdown||{}, null, 2);
   document.getElementById('lineage').textContent = JSON.stringify(a.data_lineage||{}, null, 2);
