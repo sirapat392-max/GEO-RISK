@@ -39,6 +39,11 @@
     .muted{color:var(--muted)}
     .news-item{padding:10px 0;border-bottom:1px dashed #334774}
     .news-item:last-child{border-bottom:none}
+    .kv{display:grid;grid-template-columns:180px 1fr;gap:8px;padding:6px 0;border-bottom:1px dashed #2b3e69}
+    .kv:last-child{border-bottom:none}
+    .chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#223461;border:1px solid #3a558f;color:#dbe6ff;font-size:11px;margin:2px 4px 2px 0}
+    .bar{height:8px;background:#20325d;border-radius:999px;overflow:hidden}
+    .bar>i{display:block;height:100%;background:linear-gradient(90deg,#60a5fa,#34d399)}
     a{color:#9dc7ff;text-decoration:none}
     pre{white-space:pre-wrap;margin:0;color:#dce5ff}
     @media (max-width:1000px){.kpi{grid-template-columns:repeat(2,1fr)}.two{grid-template-columns:1fr}.split{grid-template-columns:1fr}}
@@ -141,6 +146,36 @@ const badge = (txt)=>{
   return `<span class="tag ${cls}">${p}%</span>`;
 }
 
+
+function renderDetailed(metrics){
+  if(!metrics) return '-';
+  const ov = metrics.overall||{};
+  const rows = [
+    ['event_volume', ov.event_volume],
+    ['severe_signal_count', ov.severe_signal_count],
+    ['thailand_relevance_avg', ov.thailand_relevance_avg],
+    ['risk_level', ov.risk_level]
+  ];
+  let html = rows.map(([k,v])=>`<div class="kv"><div class="muted">${k}</div><div><b>${v??'-'}</b></div></div>`).join('');
+  const bc = metrics.by_category||{};
+  html += '<div style="margin-top:8px"><b>Top Categories</b></div>';
+  const top = Object.entries(bc).sort((a,b)=>(b[1].event_count||0)-(a[1].event_count||0)).slice(0,5);
+  html += top.map(([k,v])=>`<div class="kv"><div>${k}</div><div>events: <b>${v.event_count||0}</b> • conf: <b>${v.avg_confidence||0}</b></div></div>`).join('');
+  return html;
+}
+
+function renderLineage(lineage){
+  if(!lineage) return '-';
+  let html='';
+  for(const [cat,obj] of Object.entries(lineage)){
+    html += `<div style="margin:8px 0;padding:8px;background:#1a2850;border:1px solid #304576;border-radius:10px"><b>${cat}</b> <span class="muted">(${obj.evidence_count||0})</span>`;
+    const ev=(obj.evidence||[]).slice(0,3);
+    html += ev.map(e=>`<div style="margin-top:6px">• ${e.title||''}<div>${(e.sources||[]).map(s=>`<span class=\"chip\">${s}</span>`).join('')}<div class=\"bar\"><i style=\"width:${Math.round((e.confidence||0)*100)}%\"></i></div></div></div>`).join('');
+    html += '</div>';
+  }
+  return html;
+}
+
 async function loadAll(){
   document.getElementById('status').textContent=' loading...';
   const [riskRes, newsRes] = await Promise.all([
@@ -181,10 +216,10 @@ async function loadAll(){
   document.getElementById('quality').textContent = JSON.stringify(a.data_quality||{}, null, 2);
   document.getElementById('summary').textContent = a.summary || '-';
   document.getElementById('delta').textContent = JSON.stringify({delta:a.delta_24h_proxy, explain:a.explain_change}, null, 2);
-  document.getElementById('metrics').textContent = JSON.stringify(a.detailed_metrics||{}, null, 2);
+  document.getElementById('metrics').innerHTML = renderDetailed(a.detailed_metrics||{});
   document.getElementById('formula').textContent = JSON.stringify(a.formula_panel||{}, null, 2);
   document.getElementById('weights').textContent = JSON.stringify(a.weight_breakdown||{}, null, 2);
-  document.getElementById('lineage').textContent = JSON.stringify(a.data_lineage||{}, null, 2);
+  document.getElementById('lineage').innerHTML = renderLineage(a.data_lineage||{});
 
   document.getElementById('news').innerHTML = (newsRes.items||[]).map(n=>`<div class='news-item'><a href='${n.link}' target='_blank'>${n.title}</a><div class='muted'>${(n.sources||[n.source]).join(', ')} | ${n.published||''}</div></div>`).join('');
 
